@@ -1,0 +1,51 @@
+name: Publish verified ESPN website update
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: ilg-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install HTML parser
+        run: python -m pip install beautifulsoup4==4.12.3
+      - name: Fetch and validate ESPN snapshot
+        run: python scripts/check_espn.py
+      - name: Build website safely
+        run: python scripts/build_site.py --snapshot espn-preview.json --template site-template.html --output index.html
+      - name: Check essential site sections
+        run: |
+          python - <<'PY'
+          from bs4 import BeautifulSoup
+          from pathlib import Path
+          s=BeautifulSoup(Path('index.html').read_text(encoding='utf-8'),'html.parser')
+          for name in ('weekly','standings','power','seasons','drafts','profiles','gallery','office'):
+              assert s.find(id=name), f'Missing site section: {name}'
+          assert len(s.select('#standings tbody tr')) == 10, 'Standings must have ten teams'
+          assert len(s.select('#weekly .matchup-meta')) == 5, 'Five matchups required'
+          assert len(s.find_all('img')) >= 50, 'Photo gallery unexpectedly reduced'
+          print('Page structure and photo checks passed')
+          PY
+      - name: Commit only the generated website
+        run: |
+          if git diff --quiet -- index.html; then
+            echo 'No changes to publish.'
+            exit 0
+          fi
+          git config user.name 'I LIKE GAMES updater'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          git commit -m 'Update I LIKE GAMES from validated ESPN results'
+          git push
