@@ -1,0 +1,28 @@
+name: Preview ESPN website update
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install HTML parser
+        run: python -m pip install beautifulsoup4==4.12.3
+      - name: Fetch and validate ESPN
+        run: python scripts/check_espn.py
+      - name: Generate site preview (DO NOT PUBLISH)
+        run: python scripts/build_site.py --snapshot espn-preview.json --template site-template.html --output index.html
+      - name: Upload site preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: ilg-website-preview
+          path: |
+            index.html
+            espn-preview.json
+          retention-days: 7
