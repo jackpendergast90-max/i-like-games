@@ -1,6 +1,9 @@
 name: Publish verified ESPN website update
 on:
   workflow_dispatch:
+  schedule:
+    # Tuesdays at 16:00 UTC (noon EDT / 11 AM EST)
+    - cron: '0 16 * * 2'
 permissions:
   contents: write
 concurrency:
