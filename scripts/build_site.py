@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Update current-season website sections from validated ESPN snapshot. Historical content untouched."""
-import json, sys, argparse
+import json, sys, argparse, html
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 
 MANAGERS={1:'Jack Pendergast',3:'Oli Cooke',4:'Tom Gatenby',6:'Jared Butler',7:'Oliver Hayes',8:'Bonner Youngblood',9:'Jake Knowlton-Parry',10:'Taylor Wells',11:'Jason Roberts',12:'William Leonard'}
 
-def build(snapshot, template):
+def build(snapshot, template, ledger="data/chug_status.json", player_points="data/player_points_2026.json", image_dir="images/chugs"):
     d=json.loads(Path(snapshot).read_text(encoding='utf-8'))
     assert str(d['league_id'])=='1631713270' and int(d['season'])==2026
     teams={int(t['id']):t['name'].strip() for t in d['teams']}
@@ -85,12 +85,109 @@ def build(snapshot, template):
         if recaps:
             notice=soup.new_tag('p',attrs={'class':'small'});notice.string=f'2026 recap archive below reflects previously published editorial coverage. Current results are in the Week {week} scoreboard above.'
             recaps.insert(1,notice)
+    # Player Lab: never present 2025 statistics as 2026 season points.
+    lab=soup.find('section',id='playerlab')
+    if lab:
+        current=lab.find('details',attrs={'data-season':'2026'})
+        if current:
+            payload={}
+            if Path(player_points).exists():
+                payload=json.loads(Path(player_points).read_text(encoding='utf-8'))
+                if int(payload.get('season',0))!=2026:raise ValueError('Wrong player points season')
+            points=payload.get('points_by_name',{})
+            rows=current.select('tbody tr')
+            for tr in rows:
+                cells=tr.find_all('td')
+                if len(cells)<5:continue
+                name=cells[1].get_text(' ',strip=True)
+                cells[4].string=f"{points[name]:.2f}" if name in points else '—'
+            rows.sort(key=lambda tr:-(float(tr.find_all('td')[4].get_text()) if tr.find_all('td')[4].get_text()!='—' else -1))
+            tbody=current.find('tbody');tbody.clear()
+            for tr in rows:tbody.append(tr)
+            if current.find('summary'):
+                current.find('summary').string='2026 Draft Scoring · available season-to-date totals'
+            caution=lab.find(class_='archive-caution')
+            if caution:
+                if payload:
+                    caution.string=f"2026 fantasy points: ESPN 2026 player export through Week {payload.get('through_week','?')} (not updated by Tuesday matchup refresh). Dashes mean no verified 2026 total in the export. Prior seasons retain their archived figures."
+                else:
+                    caution.string='2026 fantasy point totals unavailable until verified 2026 player data is supplied. Prior seasons retain their archived figures.'
+    # Highlight lowest scorer from the latest fully completed regular-season week.
+    all_week_scores={}
+    for m in complete:
+        w=int(m['week'])
+        all_week_scores.setdefault(w,[]).extend([(int(m['home_id']),float(m['home_points'])),(int(m['away_id']),float(m['away_points']))])
+    for w,scores in all_week_scores.items():
+        if len(scores)!=10 or len({i for i,_ in scores})!=10:raise ValueError(f'Incomplete chug scoreboard week {w}')
+    ledger_path=Path(ledger)
+    status=json.loads(ledger_path.read_text(encoding='utf-8')) if ledger_path.exists() else {}
+    status=status.get('2026',{})
+    valid={'paid','unpaid','unverified'}
+    if any(v not in valid for v in status.values()):raise ValueError('Invalid chug ledger status')
+    last_scores=sorted(all_week_scores[last],key=lambda t:t[1]);loser_id,loser_points=last_scores[0]
+    chug=soup.new_tag('section',id='chug-tracker')
+    tag=soup.new_tag('div',attrs={'class':'tag'});tag.string=f'Week {last} · Lowest score pays';chug.append(tag)
+    h2=soup.new_tag('h2');h2.string='🍺 The Chug Watch';chug.append(h2)
+    intro=soup.new_tag('p',attrs={'class':'chug-lede'});intro.string=f'{MANAGERS[loser_id]} · {loser_points:.2f} points · Thursday deadline';chug.append(intro)
+    hint=soup.new_tag('p',attrs={'class':'small'});hint.string='Final weekly scores, lowest to highest. Chug completion is tracked separately from ESPN.';chug.append(hint)
+    bars=soup.new_tag('div',attrs={'class':'chug-bars'})
+    top_score=max(v for _,v in last_scores) or 1
+    for idx,(i,pts) in enumerate(last_scores):
+        item=soup.new_tag('div',attrs={'class':'chug-bar-row'+(' chug-lowest' if idx==0 else '')})
+        name=soup.new_tag('span',attrs={'class':'chug-name'});name.string=MANAGERS[i];item.append(name)
+        track=soup.new_tag('div',attrs={'class':'chug-track'});fillbar=soup.new_tag('div',attrs={'class':'chug-fill'});fillbar['style']=f'width:{max(2,100*pts/top_score):.1f}%';track.append(fillbar);item.append(track)
+        value=soup.new_tag('strong');value.string=f'{pts:.2f}';item.append(value);bars.append(item)
+    chug.append(bars)
+    debt=soup.new_tag('h3');debt.string='2026 Chug Ledger';chug.append(debt)
+    table=soup.new_tag('table',attrs={'class':'chug-ledger'})
+    thead=soup.new_tag('thead');tr=soup.new_tag('tr')
+    for label in ('Week','Lowest scorer','Points','Status'):
+        th=soup.new_tag('th');th.string=label;tr.append(th)
+    thead.append(tr);table.append(thead);tbody=soup.new_tag('tbody')
+    for w in sorted(all_week_scores,reverse=True):
+        i,pts=min(all_week_scores[w],key=lambda t:t[1]);state=status.get(str(w),'paid' if w<=5 else 'unverified')
+        tr=soup.new_tag('tr')
+        for val in (str(w),MANAGERS[i],f'{pts:.2f}',state.upper()):
+            td=soup.new_tag('td');td.string=val
+            if val==state.upper():td['class']='chug-status-'+state
+            tr.append(td)
+        tbody.append(tr)
+    table.append(tbody);wrap=soup.new_tag('div',attrs={'class':'scroll'});wrap.append(table);chug.append(wrap)
+    note=soup.new_tag('p',attrs={'class':'small'});note.string='Commissioner updates payment status in data/chug_status.json; ESPN updates never overwrite it.';chug.append(note)
+    weekly.insert_before(chug)
+    nav=soup.find('nav')
+    if nav:
+        a=soup.new_tag('a',href='#chug-tracker');a.string='🍺 Chug Watch';nav.insert(1,a)
+        gallery_link=nav.find('a',href='#gallery')
+        if gallery_link:gallery_link.string='🍻 Chug Photos'
+    css=soup.new_tag('style');css.string="""
+    #chug-tracker{max-width:1160px;margin:30px auto 0;padding:0 20px;scroll-margin-top:85px}
+    .chug-lede{font:700 clamp(20px,3vw,30px) Georgia,serif;margin:8px 0;color:#9b452d}
+    .chug-bars{background:#fffefa;border:1px solid #d7dcd0;border-radius:12px;padding:15px;margin:15px 0 25px}
+    .chug-bar-row{display:grid;grid-template-columns:minmax(125px,210px) minmax(80px,1fr) 65px;align-items:center;gap:12px;padding:8px;border-radius:6px}
+    .chug-bar-row strong{text-align:right;font-variant-numeric:tabular-nums}
+    .chug-name{font-weight:650;font-size:13px}.chug-track{height:17px;background:#e8ece4;border-radius:5px;overflow:hidden}
+    .chug-fill{height:100%;background:#507b5e;border-radius:5px}.chug-lowest{background:#f9e8dd}.chug-lowest .chug-fill{background:#b95c3f}
+    .chug-ledger{min-width:420px}.chug-status-unpaid{font-weight:900;color:#a83d26}.chug-status-paid{font-weight:800;color:#276b46}.chug-status-unverified{font-weight:700;color:#796f54}
+    @media(max-width:600px){.chug-bar-row{grid-template-columns:110px minmax(50px,1fr) 55px;gap:6px;padding:8px 3px}.chug-name{font-size:11px}.chug-bar-row strong{font-size:11px}}
+    """;soup.head.append(css)
+    # Future photo uploads: add files under images/chugs/; no base64 conversion required.
+    gallery=soup.find('section',id='gallery')
+    folder=Path(image_dir)
+    if gallery and folder.exists():
+        grid=gallery.find(class_='photo-grid')
+        if grid:
+            for f in sorted(folder.iterdir()):
+                if f.is_file() and f.suffix.lower() in ('.jpg','.jpeg','.png','.webp'):
+                    figure=soup.new_tag('figure',attrs={'class':'photo-tile'})
+                    img=soup.new_tag('img',src=f'{folder.as_posix()}/{f.name}',loading='lazy',alt=f'Chug archive photo {f.stem}')
+                    figure.append(img);caption=soup.new_tag('figcaption');caption.string=f.stem.replace('_',' ').replace('-',' ');figure.append(caption);grid.append(figure)
     return str(soup)
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--snapshot',default='espn-preview.json');p.add_argument('--template',default='site-template.html');p.add_argument('--output',default='index.html');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--snapshot',default='espn-preview.json');p.add_argument('--template',default='site-template.html');p.add_argument('--output',default='index.html');p.add_argument('--ledger',default='data/chug_status.json');p.add_argument('--player-points',default='data/player_points_2026.json');p.add_argument('--image-dir',default='images/chugs');a=p.parse_args()
     try:
-        html=build(a.snapshot,a.template)
+        html=build(a.snapshot,a.template,a.ledger,a.player_points,a.image_dir)
         Path(a.output).write_text(html,encoding='utf-8')
         print('Validated and built',a.output,'from',a.snapshot)
     except Exception as e:
