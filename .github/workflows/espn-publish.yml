@@ -3,9 +3,15 @@ name: Publish verified ESPN website update
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'chug_status.json'
   schedule:
-    # Tuesdays at 16:00 UTC (noon EDT / 11 AM EST)
+    # Tuesdays at 16:00 UTC
     - cron: '0 16 * * 2'
+
 
 permissions:
   contents: write
